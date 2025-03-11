@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>红蓝对抗 跳跃游戏（相机跟随+平滑切换）</title>
+  <style>
+    body { text-align: center; font-family: Arial, sans-serif; }
+    #gameCanvas { border: 1px solid #000; background-color: #eef; margin: 10px auto; display: block; }
+    #powerBarContainer {
+      width: 300px;
+      height: 20px;
+      border: 1px solid #333;
+      margin: 10px auto;
+      position: relative;
+      cursor: pointer;
+    }
+    #powerBar {
+      height: 100%;
+      background-color: green;
+      width: 0%;
+    }
+    #punishmentOptions button { margin: 5px; }
+  </style>
+</head>
+<body>
+  <h1>红蓝对抗 跳跃游戏（相机跟随+平滑切换）</h1>
+  <!-- 游戏开始界面 -->
+  <div id="gameSetup">
+    <button id="startGameBtn">开始游戏</button>
+  </div>
+  
+  <!-- 游戏进行界面 -->
+  <div id="gameArea" style="display: none;">
+    <div id="turnInfo"></div>
+    <canvas id="gameCanvas" width="600" height="300"></canvas>
+    <div id="powerBarContainer">
+      <div id="powerBar"></div>
+    </div>
+    <div id="scoreInfo"></div>
+    <p>按住鼠标左键来蓄力，松开释放跳跃</p>
+  </div>
+  
+  <!-- 惩罚选项界面 -->
+  <div id="punishmentArea" style="display: none;">
+    <h2></h2>
+    <div id="punishmentOptions">
+      <button data-option="confess">跟对方1号表白</button>
+      <button data-option="task">完成对方2号的小指令</button>
+      <button data-option="sing">唱一首歌</button>
+      <button data-option="drink">喝一杯酒</button>
+    </div>
+    <button id="restartBtn" style="display: none;">重新开始</button>
+  </div>
+  
+  <script>
+    /***********************
+     * 游戏全局变量定义
+     ***********************/
+    var players = [
+      { name: "玩家1", team: null, score: 0 },
+      { name: "玩家2", team: null, score: 0 },
+      { name: "玩家3", team: null, score: 0 },
+      { name: "玩家4", team: null, score: 0 }
+    ];
+    var teams = { red: [], blue: [] };
+    var turnOrder = [];
+    var turnIndex = 0;
+    
+    // Canvas 相关变量
+    var canvas, ctx;
+    var groundY = 250;        // 地面高度
+    var startX = 50;          // 小人起始横坐标（世界坐标，每回合重置）
+    var currentTargetX = 250; // 目标方块横坐标（世界坐标）
+    var blockWidth = 40;      // 目标方块宽度
+    var blockHeight = 20;     // 目标方块高度
+    
+    // 蓄力相关变量
+    var currentPower = 0;
+    var powerInterval = null;
+    var maxPower = 100;
+    var powerIncrement = 1;
+    var powerBar;  
+    
+    var jumpInProgress = false; // 标识当前是否处于跳跃动画中
+    
+    // 新增：角色状态："upright"（直立）、"crouching"（下蹲）、"jumping"（跳跃）
+    var characterState = "upright";
+    
+    // 相机偏移量（用于实现画面跟随），初始为 0，单位：像素
+    var cameraOffset = 0;
+    // 当小人跳出画面右侧后，保持小人距离画面左侧 cameraThreshold 像素的位置
+    var cameraThreshold = 300;
+    
+    /***********************
+     * 平滑动画函数
+     ***********************/
+    // 平滑更新 cameraOffset，从 from 到 to，duration 毫秒后调用 callback
+    function animateCameraTransition(from, to, callback) {
+      var duration = 300; // 动画时长 300ms
+      var startTime = null;
+      function anim(timestamp) {
+        if (!startTime) startTime = timestamp;
+        var elapsed = timestamp - startTime;
+        var progress = Math.min(elapsed / duration, 1);
+        cameraOffset = from + (to - from) * progress;
+        // 重新绘制当前画面（当前玩家的位置不变）
+        drawGame(startX, 0);
+        if (progress < 1) {
+          requestAnimationFrame(anim);
+        } else {
+          callback();
+        }
+      }
+      requestAnimationFrame(anim);
+    }
+    
+    /***********************
+     * 游戏逻辑函数
+     ***********************/
+    // 随机分配队伍（打乱数组后，前两为红队、后两为蓝队）
+    function assignTeams() {
+      players.sort(() => Math.random() - 0.5);
+      teams.red = [players[0], players[1]];
+      teams.blue = [players[2], players[3]];
+      teams.red.forEach(p => p.team = "红队");
+      teams.blue.forEach(p => p.team = "蓝队");
+      // 红队先玩，蓝队后玩
+      turnOrder = teams.red.concat(teams.blue);
+    }
+    
+    // 初始化 canvas、事件绑定等
+    function initGame() {
+      canvas = document.getElementById("gameCanvas");
+      ctx = canvas.getContext("2d");
+      powerBar = document.getElementById("powerBar");
+      var powerBarContainer = document.getElementById("powerBarContainer");
+      // 绑定鼠标按下和松开事件
+      powerBarContainer.addEventListener("mousedown", startPower);
+      powerBarContainer.addEventListener("mouseup", releasePower);
+      resetTurn();
+    }
+    
+    // 重置本回合，不重置相机偏移（相机平滑切换在换人时完成）
+    function resetTurn() {
+      // 每个新回合，玩家世界坐标重新从 50 开始
+      startX = 50;
+      currentTargetX = getRandomTargetX();
+      currentPower = 0;
+      updatePowerBar();
+      characterState = "upright"; // 重置为直立
+      drawGame(startX, 0);
+      updateTurnInfo();
+      updateScoreInfo();
+      jumpInProgress = false;
+    }
+    
+    // 生成一个随机目标位置（相对于起点的世界坐标）
+    function getRandomTargetX() {
+      return startX + 100 + Math.random() * 100;
+    }
+    
+    function updateTurnInfo() {
+      var turnInfo = document.getElementById("turnInfo");
+      var currentPlayer = currentPlayerObj();
+      turnInfo.textContent = "当前轮到：" + currentPlayer.name + " (" + currentPlayer.team + ")";
+    }
+    
+    function updateScoreInfo() {
+      var scoreInfo = document.getElementById("scoreInfo");
+      var currentPlayer = currentPlayerObj();
+      scoreInfo.textContent = "当前得分：" + currentPlayer.score;
+    }
+    
+    function updatePowerBar() {
+      var percent = (currentPower / maxPower) * 100;
+      powerBar.style.width = percent + "%";
+    }
+    
+    // 按下鼠标时开始蓄力，同时切换为下蹲状态
+    function startPower() {
+      if (jumpInProgress) return;
+      characterState = "crouching";
+      if (powerInterval) clearInterval(powerInterval);
+      powerInterval = setInterval(function() {
+        currentPower += powerIncrement;
+        if (currentPower >= maxPower) {
+          currentPower = 0; // 达到最大值后重置
+          characterState = "upright"; // 达到最大值时恢复直立
+        }
+        updatePowerBar();
+      }, 20);
+      // 蓄力期间重绘，显示下蹲状态
+      drawGame(startX, 0);
+    }
+    
+    // 松开鼠标后结束蓄力，切换为跳跃状态，并开始跳跃动画
+    function releasePower() {
+      if (jumpInProgress) return;
+      clearInterval(powerInterval);
+      powerInterval = null;
+      characterState = "jumping";
+      var jumpDistance = currentPower * 2;
+      var jumpTarget = startX + jumpDistance;
+      jumpInProgress = true;
+      animateJump(startX, jumpTarget, function(finalX) {
+        var tolerance = 10;
+        if (finalX >= currentTargetX - tolerance && finalX <= currentTargetX + blockWidth + tolerance) {
+          var currentP = currentPlayerObj();
+          currentP.score += 1;
+          // 更新起点为目标中点，并生成下一个目标
+          startX = currentTargetX + blockWidth / 2;
+          currentTargetX = startX + 100 + Math.random() * 100;
+          currentPower = 0;
+          updatePowerBar();
+          // 判断是否需要向右平移相机
+          if (startX > cameraOffset + cameraThreshold) {
+            animateCameraTransition(cameraOffset, startX - cameraThreshold, function() {
+              // 动画结束后更新相机值
+              cameraOffset = startX - cameraThreshold;
+              jumpInProgress = false;
+              characterState = "upright";
+              drawGame(startX, 0);
+              updateScoreInfo();
+            });
+          } else {
+            jumpInProgress = false;
+            characterState = "upright";
+            drawGame(startX, 0);
+            updateScoreInfo();
+          }
+        } else {
+          alert(currentPlayerObj().name + " 跳跃失败，得分：" + currentPlayerObj().score);
+          nextTurn();
+        }
+      });
+    }
+    
+    // 使用 requestAnimationFrame 实现跳跃动画，同时计算水平与垂直位移（抛物线效果）
+    function animateJump(fromX, toX, callback) {
+      var duration = 500; // 动画时长（毫秒）
+      var jumpHeight = 50; // 最大跳跃高度
+      var startTime = null;
+      function animate(timestamp) {
+        if (!startTime) startTime = timestamp;
+        var elapsed = timestamp - startTime;
+        var progress = Math.min(elapsed / duration, 1);
+        var currentX = fromX + (toX - fromX) * progress;
+        // 利用抛物线公式计算垂直位移：在 0 和 1 时为 0，在 0.5 时达到最高点
+        var verticalOffset = -4 * jumpHeight * (progress - 0.5) * (progress - 0.5) + jumpHeight;
+        drawGame(currentX, verticalOffset);
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        } else {
+          callback(currentX);
+        }
+      }
+      requestAnimationFrame(animate);
+    }
+    
+    // 绘制游戏画面  
+    // 使用 ctx.translate(-cameraOffset, 0) 实现“相机跟随”效果  
+    // 参数 characterX：小人的世界横坐标；verticalOffset：垂直位移（默认 0）
+    function drawGame(characterX, verticalOffset) {
+      if (verticalOffset === undefined) verticalOffset = 0;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      // 平移画布，实现相机跟随效果
+      ctx.translate(-cameraOffset, 0);
+      
+      // 绘制较长的地面，确保能显示足够区域
+      ctx.beginPath();
+      ctx.moveTo(0, groundY);
+      ctx.lineTo(2000, groundY);
+      ctx.stroke();
+      
+      // 绘制目标方块（世界坐标）
+      ctx.fillStyle = "gray";
+      ctx.fillRect(currentTargetX, groundY - blockHeight, blockWidth, blockHeight);
+      
+      // 绘制小人
+      drawCharacter(characterX, characterState, verticalOffset);
+      
+      ctx.restore();
+    }
+    
+    // 绘制小人，根据状态显示不同姿态  
+    // 参数 x：小人的世界横坐标（经过 translate 后自动调整）；state：姿态；verticalOffset：垂直位移
+    function drawCharacter(x, state, verticalOffset) {
+      if (verticalOffset === undefined) verticalOffset = 0;
+      var feetY = groundY; // 地面 y 坐标
+      ctx.lineWidth = 2;
+      var color = (currentPlayerObj().team === "红队") ? "red" : "blue";
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      
+      if (state === "upright") {
+        // 直立姿势
+        ctx.beginPath();
+        ctx.arc(x, feetY - 40 - verticalOffset, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(x, feetY - 30 - verticalOffset);
+        ctx.lineTo(x, feetY - 10 - verticalOffset);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x, feetY - 25 - verticalOffset);
+        ctx.lineTo(x - 10, feetY - 20 - verticalOffset);
+        ctx.moveTo(x, feetY - 25 - verticalOffset);
+        ctx.lineTo(x + 10, feetY - 20 - verticalOffset);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x, feetY - 10 - verticalOffset);
+        ctx.lineTo(x - 10, feetY - verticalOffset);
+        ctx.moveTo(x, feetY - 10 - verticalOffset);
+        ctx.lineTo(x + 10, feetY - verticalOffset);
+        ctx.stroke();
+      } else if (state === "crouching") {
+        // 下蹲姿势
+        ctx.beginPath();
+        ctx.arc(x, feetY - 30 - verticalOffset, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(x, feetY - 25 - verticalOffset);
+        ctx.lineTo(x, feetY - 15 - verticalOffset);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x, feetY - 22 - verticalOffset);
+        ctx.lineTo(x - 10, feetY - 17 - verticalOffset);
+        ctx.moveTo(x, feetY - 22 - verticalOffset);
+        ctx.lineTo(x + 10, feetY - 17 - verticalOffset);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x, feetY - 15 - verticalOffset);
+        ctx.lineTo(x - 5, feetY - verticalOffset);
+        ctx.moveTo(x, feetY - 15 - verticalOffset);
+        ctx.lineTo(x + 5, feetY - verticalOffset);
+        ctx.stroke();
+      } else if (state === "jumping") {
+        // 跳跃姿势
+        ctx.beginPath();
+        ctx.arc(x, feetY - 40 - verticalOffset, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(x, feetY - 30 - verticalOffset);
+        ctx.lineTo(x, feetY - 10 - verticalOffset);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x, feetY - 25 - verticalOffset);
+        ctx.lineTo(x - 10, feetY - 35 - verticalOffset);
+        ctx.moveTo(x, feetY - 25 - verticalOffset);
+        ctx.lineTo(x + 10, feetY - 35 - verticalOffset);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x, feetY - 10 - verticalOffset);
+        ctx.lineTo(x - 10, feetY - 5 - verticalOffset);
+        ctx.moveTo(x, feetY - 10 - verticalOffset);
+        ctx.lineTo(x + 10, feetY - 5 - verticalOffset);
+        ctx.stroke();
+      }
+    }
+    
+    // 返回当前回合玩家对象
+    function currentPlayerObj() {
+      return turnOrder[turnIndex];
+    }
+    
+    // 切换到下一位玩家时，先平滑恢复相机到 0，再进入新回合
+    function nextTurn() {
+      turnIndex++;
+      if (turnIndex < turnOrder.length) {
+        animateCameraTransition(cameraOffset, 0, function() {
+          cameraOffset = 0;
+          resetTurn();
+        });
+      } else {
+        endGame();
+      }
+    }
+    
+    // 游戏结束，根据两队得分判定输赢，并显示惩罚选项
+    function endGame() {
+      var redScore = teams.red[0].score + teams.red[1].score;
+      var blueScore = teams.blue[0].score + teams.blue[1].score;
+      var resultText = "比赛结束！红队得分：" + redScore + "，蓝队得分：" + blueScore + "。";
+      var losingTeam = "";
+      if (redScore < blueScore) {
+        resultText += " 红队失败！";
+        losingTeam = "红队";
+      } else if (blueScore < redScore) {
+        resultText += " 蓝队失败！";
+        losingTeam = "蓝队";
+      } else {
+        resultText += " 平局，无惩罚。";
+      }
+      document.getElementById("turnInfo").textContent = resultText;
+      document.getElementById("gameArea").style.display = "none";
+      var punishmentArea = document.getElementById("punishmentArea");
+      punishmentArea.style.display = "block";
+      if (losingTeam !== "") {
+        punishmentArea.querySelector("h2").textContent = losingTeam + " 请接受惩罚！";
+      } else {
+        punishmentArea.querySelector("h2").textContent = "平局！";
+        document.getElementById("punishmentOptions").innerHTML = "<p>平局，无需惩罚</p>";
+        document.getElementById("restartBtn").style.display = "block";
+      }
+    }
+    
+    /***********************
+     * 页面加载及事件绑定
+     ***********************/
+    window.onload = function() {
+      document.getElementById("startGameBtn").addEventListener("click", function() {
+        assignTeams();
+        turnIndex = 0;
+        players.forEach(function(p) { p.score = 0; });
+        document.getElementById("gameSetup").style.display = "none";
+        document.getElementById("gameArea").style.display = "block";
+        // 每个新游戏开始时，重置相机
+        cameraOffset = 0;
+        initGame();
+      });
+      
+      var punishmentButtons = document.querySelectorAll("#punishmentOptions button");
+      punishmentButtons.forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          alert("你选择了惩罚：" + btn.getAttribute("data-option"));
+          document.getElementById("restartBtn").style.display = "block";
+        });
+      });
+      
+      document.getElementById("restartBtn").addEventListener("click", function() {
+        location.reload();
+      });
+    };
+  </script>
+</body>
+</html>
+

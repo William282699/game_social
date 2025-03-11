@@ -1,0 +1,92 @@
+// 引入 Pixi.js
+const app = new PIXI.Application({
+    width: 600,
+    height: 700,
+    backgroundColor: 0x1099bb
+});
+document.body.appendChild(app.view);
+
+// 资源
+const cardBackTexture = PIXI.Texture.from('images/hs.png'); // 需要替换成你的图片路径
+const fruitTextures = [
+    PIXI.Texture.from('images/apple.png'),
+    PIXI.Texture.from('images/banana.png'),
+    PIXI.Texture.from('images/grape.png'),
+    PIXI.Texture.from('images/orange.png'),
+    PIXI.Texture.from('images/watermelon.png'),
+    PIXI.Texture.from('images/pineapple.png'),
+    PIXI.Texture.from('images/peach.png'),
+    PIXI.Texture.from('images/cherry.png')
+];
+
+// 创建卡牌
+let cards = [];
+let firstCard = null;
+let lockBoard = false;
+const totalCards = 16;
+
+function shuffle(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+    return array;
+}
+
+function createBoard() {
+    const fruitPairs = fruitTextures.concat(fruitTextures);
+    shuffle(fruitPairs);
+    
+    for (let i = 0; i < totalCards; i++) {
+        const card = new PIXI.Sprite(cardBackTexture);
+        card.anchor.set(0.5);
+        card.x = 100 + (i % 4) * 120;
+        card.y = 150 + Math.floor(i / 4) * 150;
+        card.interactive = true;
+        card.buttonMode = true;
+        card.textureFront = fruitPairs[i];
+        card.flipped = false;
+        card.on('pointerdown', () => flipCard(card));
+        
+        app.stage.addChild(card);
+        cards.push(card);
+    }
+}
+
+function flipCard(card) {
+    if (lockBoard || card.flipped) return;
+    card.flipped = true;
+    
+    // 动画翻转
+    gsap.to(card.scale, { x: 0, duration: 0.3, onComplete: () => {
+        card.texture = card.textureFront;
+        gsap.to(card.scale, { x: 1, duration: 0.3 });
+    }});
+    
+    if (!firstCard) {
+        firstCard = card;
+        return;
+    }
+    
+    if (firstCard.texture === card.texture) {
+        firstCard = null;
+    } else {
+        lockBoard = true;
+        setTimeout(() => {
+            firstCard.flipped = false;
+            card.flipped = false;
+            gsap.to(firstCard.scale, { x: 0, duration: 0.3, onComplete: () => {
+                firstCard.texture = cardBackTexture;
+                gsap.to(firstCard.scale, { x: 1, duration: 0.3 });
+            }});
+            gsap.to(card.scale, { x: 0, duration: 0.3, onComplete: () => {
+                card.texture = cardBackTexture;
+                gsap.to(card.scale, { x: 1, duration: 0.3 });
+            }});
+            firstCard = null;
+            lockBoard = false;
+        }, 1000);
+    }
+}
+
+createBoard();

@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>飞刀对战游戏 - 小人投掷版</title>
+  <style>
+    body { margin: 0; background: #f0f0f0; }
+    canvas { display: block; margin: 0 auto; background: #ffffff; }
+    /* 分数及提示 */
+    #scoreBoard {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      font-family: Arial, sans-serif;
+      font-size: 16px;
+      color: #333;
+    }
+    /* 惩罚选项层 */
+    #penaltyOverlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.6);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      flex-direction: column;
+      color: white;
+      font-family: Arial, sans-serif;
+    }
+    #penaltyOverlay button {
+      margin: 5px;
+      padding: 10px 20px;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <div id="scoreBoard"></div>
+  <div id="penaltyOverlay">
+    <div id="penaltyText" style="margin-bottom:20px;font-size:20px;">输的一队请选择惩罚</div>
+    <div>
+      <button data-option="confess">跟对方1号表白</button>
+      <button data-option="task">完成对方2号的小指令</button>
+      <button data-option="sing">唱一首歌</button>
+      <button data-option="drink">喝一杯酒</button>
+    </div>
+    <button id="restartBtn" style="margin-top:20px;display:none;">重新开始</button>
+  </div>
+
+  <script>
+    /****************************
+     * 全局变量定义
+     ****************************/
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    const canvasWidth = canvas.width, canvasHeight = canvas.height;
+    const scoreBoard = document.getElementById("scoreBoard");
+    const penaltyOverlay = document.getElementById("penaltyOverlay");
+    const restartBtn = document.getElementById("restartBtn");
+
+    function randomInRange(min, max) {
+      return min + Math.random() * (max - min);
+    }
+
+    // 转盘参数：转速提高为原来的5-7倍，并每隔1-3秒随机调整方向和速度
+    const turntable = {
+      center: { x: canvasWidth / 2, y: canvasHeight / 2 },
+      radius: 60,
+      rotation: 0,
+      rotationSpeed: ((Math.random() * 0.2 + 0.1) * randomInRange(5,7)) * (Math.random() < 0.5 ? 1 : -1),
+      indicatorAngle: 0,
+      changeTimer: randomInRange(1,3)
+    };
+
+    // 两队数据，每队5把刀；小人发射点固定在左右边
+    const teams = {
+      red: { remaining: 5, score: 0, start: { x: 100, y: canvasHeight/2 }, knives: Array(5).fill(true), action: 'idle' },
+      blue: { remaining: 5, score: 0, start: { x: canvasWidth - 100, y: canvasHeight/2 }, knives: Array(5).fill(true), action: 'idle' }
+    };
+
+    // 已插入的刀数组，每个元素：{ angle: 相对角（转盘参考系）, team }
+    let insertedKnives = [];
+    // 当前飞行中的刀数组，每个对象：{ team, start, target, progress, duration }
+    let activeKnives = [];
+    let lastTime = Date.now();
+
+    /****************************
+     * 键盘事件处理  
+     * "A"/"a" 发射红刀；"5" 发射蓝刀
+     ****************************/
+    window.addEventListener("keydown", (e) => {
+      if (penaltyOverlay.style.display === "flex") return;
+      if (e.key === "A" || e.key === "a") {
+        if (teams.red.remaining > 0 && teams.red.action === 'idle') {
+          fireKnife("red");
+        }
+      } else if (e.key === "5") {
+        if (teams.blue.remaining > 0 && teams.blue.action === 'idle') {
+          fireKnife("blue");
+        }
+      }
+    });
+
+    /****************************
+     * 发射刀函数
+     ****************************/
+    function fireKnife(team) {
+      teams[team].action = 'throwing';
+      setTimeout(() => { teams[team].action = 'idle'; }, 800);
+      const start = { x: teams[team].start.x, y: teams[team].start.y };
+      // 目标：从小人发射点到转盘中心的连线延伸到转盘边缘
+      const dx = start.x - turntable.center.x;
+      const dy = start.y - turntable.center.y;
+      const dist = Math.hypot(dx, dy);
+      const normX = dx / dist, normY = dy / dist;
+      const target = {
+        x: turntable.center.x + normX * turntable.radius,
+        y: turntable.center.y + normY * turntable.radius
+      };
+      const duration = 0.6;
+      activeKnives.push({ team, start, target, progress: 0, duration });
+      teams[team].remaining--;
+      teams[team].knives.pop();
+      updateScoreBoard();
+    }
+
+    /****************************
+     * 主动画循环
+     ****************************/
+    function animate() {
+      requestAnimationFrame(animate);
+      const now = Date.now();
+      const deltaTime = (now - lastTime) / 1000;
+      lastTime = now;
+
+      // 更新转盘旋转及随机变化
+      turntable.rotation += turntable.rotationSpeed * deltaTime;
+      turntable.indicatorAngle += turntable.rotationSpeed * deltaTime;
+      turntable.changeTimer -= deltaTime;
+      if(turntable.changeTimer <= 0) {
+        turntable.rotationSpeed = ((Math.random() * 0.2 + 0.1) * randomInRange(5,7)) * (Math.random() < 0.5 ? 1 : -1);
+        turntable.changeTimer = randomInRange(1,3);
+      }
+
+      ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+      // 绘制转盘（橘黄色圆盘）及指示器
+      ctx.save();
+      ctx.translate(turntable.center.x, turntable.center.y);
+      ctx.rotate(turntable.rotation);
+      ctx.beginPath();
+      ctx.arc(0, 0, turntable.radius, 0, Math.PI * 2);
+      ctx.fillStyle = "#FFA500";
+      ctx.fill();
+      ctx.save();
+      ctx.rotate(turntable.indicatorAngle);
+      ctx.beginPath();
+      ctx.moveTo(0, -turntable.radius - 10);
+      ctx.lineTo(0, -turntable.radius - 30);
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 5;
+      ctx.stroke();
+      ctx.restore();
+      ctx.restore();
+
+      // 绘制已插入的刀：计算插入角在转盘参考系下的全局角
+      insertedKnives.forEach(k => {
+        const globalAngle = k.angle + turntable.rotation;
+        // 插入点在转盘边缘
+        const x = turntable.center.x + turntable.radius * Math.cos(globalAngle);
+        const y = turntable.center.y + turntable.radius * Math.sin(globalAngle);
+        drawKnifeAt(x, y, null, k.team, true);
+      });
+
+      // 更新并绘制飞行中的刀
+      for (let i = activeKnives.length - 1; i >= 0; i--) {
+        let knife = activeKnives[i];
+        knife.progress += deltaTime / knife.duration;
+        if (knife.progress > 1) knife.progress = 1;
+        const pos = {
+          x: knife.start.x + (knife.target.x - knife.start.x) * knife.progress,
+          y: knife.start.y + (knife.target.y - knife.start.y) * knife.progress
+        };
+        drawKnifeAt(pos.x, pos.y, Math.atan2(knife.target.y - knife.start.y, knife.target.x - knife.start.x), knife.team, false);
+        if (knife.progress >= 1) {
+          processKnifeCollision(knife);
+          activeKnives.splice(i, 1);
+        }
+      }
+
+      // 绘制左右小人
+      drawCharacters();
+      updateScoreBoard();
+      checkGameOver();
+    }
+
+    /****************************
+     * 绘制刀函数
+     * 若 inserted 为 true，则按插入方式绘制：计算径向角，从转盘中心到插入点，
+     * 并旋转为 (径向角 - π/2) 使得负 y 方向指向转盘中心；
+     * 然后绘制刀刃（白色）向内和刀柄（彩色）向外
+     ****************************/
+    function drawKnifeAt(x, y, angle, team, inserted) {
+      ctx.save();
+      ctx.translate(x, y);
+      if (inserted) {
+        // 计算径向角：从转盘中心到插入点
+        const dx = x - turntable.center.x;
+        const dy = y - turntable.center.y;
+        const radialAngle = Math.atan2(dy, dx);
+        // 为使得本地坐标的负 y 方向指向转盘中心，将旋转角设置为 (radialAngle - π/2)
+        ctx.rotate(radialAngle - Math.PI/2);
+        const knifeLength = 40;
+        const bladeHeight = knifeLength * 0.4;  // 刀刃部分（插入转盘内）
+        const handleHeight = knifeLength * 0.6; // 刀柄部分（留在转盘外）
+        // 绘制刀刃：从原点向上（负 y）绘制
+        ctx.fillStyle = "white";
+        ctx.fillRect(-4, -bladeHeight, 8, bladeHeight);
+        // 绘制刀柄：从原点向下（正 y）绘制
+        ctx.fillStyle = (team === "red") ? "red" : "blue";
+        ctx.fillRect(-4, 0, 8, handleHeight);
+      } else {
+        // 飞行中的刀：直接使用传入 angle 绘制
+        ctx.rotate(angle);
+        const knifeLength = 40;
+        const knifeWidth = 8;
+        ctx.fillStyle = (team === "red") ? "red" : "blue";
+        ctx.fillRect(-knifeWidth/2, -knifeLength, knifeWidth, knifeLength*0.5);
+        ctx.fillStyle = "white";
+        ctx.fillRect(-knifeWidth/2, -knifeLength*0.5, knifeWidth, knifeLength*0.5);
+      }
+      ctx.restore();
+    }
+
+    /****************************
+     * 处理刀插入检测  
+     * 计算新刀的全局插入角，将其转换为转盘参考系（相对角 = globalAngle - turntable.rotation），
+     * 若与已有插入角差值小于阈值则视为碰撞失败，否则成功插入
+     ****************************/
+    function processKnifeCollision(knife) {
+      const dx = knife.target.x - turntable.center.x;
+      const dy = knife.target.y - turntable.center.y;
+      let globalAngle = Math.atan2(dy, dx);
+      let relativeAngle = normalizeAngle(globalAngle - turntable.rotation);
+      const threshold = 0.2;
+      let collision = insertedKnives.some(k => {
+        let diff = Math.abs(normalizeAngle(relativeAngle - k.angle));
+        return diff < threshold;
+      });
+      if (!collision) {
+        insertedKnives.push({ angle: relativeAngle, team: knife.team });
+        teams[knife.team].score++;
+      }
+    }
+
+    // 将角度归一化到 [-π, π]
+    function normalizeAngle(a) {
+      a = ((a + Math.PI) % (2 * Math.PI)) - Math.PI;
+      return a;
+    }
+
+    /****************************
+     * 绘制左右小人及投掷动作
+     ****************************/
+    function drawCharacters() {
+      // 红队小人（左侧）
+      ctx.save();
+      let redX = teams.red.start.x, redY = teams.red.start.y;
+      ctx.translate(redX, redY);
+      // 绘制头部
+      ctx.beginPath();
+      ctx.arc(0, -20, 10, 0, Math.PI * 2);
+      ctx.fillStyle = "red";
+      ctx.fill();
+      // 绘制身体
+      ctx.beginPath();
+      ctx.moveTo(0, -10);
+      ctx.lineTo(0, 10);
+      ctx.strokeStyle = "red";
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      // 绘制头顶剩余刀（水平排列）
+      for (let i = 0; i < teams.red.remaining; i++){
+        ctx.fillStyle = "red";
+        ctx.fillRect(-20 + i * 10, -40, 8, 4);
+      }
+      // 投掷动作：若状态为 throwing，则绘制简单的手臂摆动
+      if (teams.red.action === 'throwing'){
+        ctx.beginPath();
+        ctx.moveTo(0, -5);
+        ctx.lineTo(-15, 0);
+        ctx.strokeStyle = "red";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 蓝队小人（右侧）
+      ctx.save();
+      let blueX = teams.blue.start.x, blueY = teams.blue.start.y;
+      ctx.translate(blueX, blueY);
+      ctx.beginPath();
+      ctx.arc(0, -20, 10, 0, Math.PI * 2);
+      ctx.fillStyle = "blue";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(0, -10);
+      ctx.lineTo(0, 10);
+      ctx.strokeStyle = "blue";
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      for (let i = 0; i < teams.blue.remaining; i++){
+        ctx.fillStyle = "blue";
+        ctx.fillRect(20 - i * 10, -40, 8, 4);
+      }
+      if (teams.blue.action === 'throwing'){
+        ctx.beginPath();
+        ctx.moveTo(0, -5);
+        ctx.lineTo(15, 0);
+        ctx.strokeStyle = "blue";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function updateScoreBoard() {
+      scoreBoard.innerHTML = `
+        红队：剩余 ${teams.red.remaining} 把，得分 ${teams.red.score}<br>
+        蓝队：剩余 ${teams.blue.remaining} 把，得分 ${teams.blue.score}
+      `;
+    }
+
+    function checkGameOver() {
+      if (teams.red.remaining === 0 && teams.blue.remaining === 0 && activeKnives.length === 0) {
+        let resultText = "";
+        if (teams.red.score > teams.blue.score) {
+          resultText = "红队获胜！蓝队接受惩罚";
+        } else if (teams.blue.score > teams.red.score) {
+          resultText = "蓝队获胜！红队接受惩罚";
+        } else {
+          resultText = "平局！";
+        }
+        document.getElementById("penaltyText").innerText = resultText + "，请选择惩罚：";
+        penaltyOverlay.style.display = "flex";
+      }
+    }
+
+    /****************************
+     * 惩罚选项及重置
+     ****************************/
+    Array.from(document.querySelectorAll("#penaltyOverlay button[data-option]")).forEach(btn => {
+      btn.addEventListener("click", () => {
+        alert("你选择了惩罚：" + btn.getAttribute("data-option"));
+        restartBtn.style.display = "block";
+      });
+    });
+    restartBtn.addEventListener("click", () => {
+      restartBtn.style.display = "none";
+      penaltyOverlay.style.display = "none";
+      resetGame();
+    });
+
+    function resetGame() {
+      turntable.rotation = 0;
+      insertedKnives = [];
+      activeKnives = [];
+      teams.red.remaining = 5; teams.red.score = 0; teams.red.knives = Array(5).fill(true); teams.red.action = 'idle';
+      teams.blue.remaining = 5; teams.blue.score = 0; teams.blue.knives = Array(5).fill(true); teams.blue.action = 'idle';
+      updateScoreBoard();
+    }
+
+    animate();
+  </script>
+</body>
+</html>
